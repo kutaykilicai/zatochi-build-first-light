@@ -2,6 +2,11 @@
 
 Zatochi Build is maintained by Kutay Kılıç (Zatochi), GitHub: kutaykilicai
 
+<div align="center">
+<img src="docs/screenshots/oyun-ici.jpg" width="860" alt="inFAMOUS First Light, Zatochi Build">
+<br><sub>Zatochi Build ile oyun içi, 2560x1440 (kırpıldı) / In game on Zatochi Build, 2560x1440 (cropped)</sub>
+</div>
+
 - [English](#english)
 - [Türkçe](#türkçe)
 
