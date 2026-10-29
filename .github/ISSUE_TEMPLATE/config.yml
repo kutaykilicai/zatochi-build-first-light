@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 axylpup
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+blank_issues_enabled: true
+contact_links:
+  - name: The official shadPS4 emulator
+    url: https://github.com/shadps4-emu/shadPS4
+    about: Problems with other games or the official shadPS4 builds go there, not here.
