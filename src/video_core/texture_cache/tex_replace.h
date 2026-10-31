@@ -50,6 +50,22 @@ bool SwapRedBlue(const ImageInfo& info);
 /// own glyphs back, a key or mouse click the pictures. A switch invalidates the matched textures'
 /// guest memory as a CPU write would (any thread may call it), so the next use re-uploads them.
 bool AutoSwitch();
+
+/// SHADPS4_TEX_DUMP=1, or a file <exe dir>/tex_dump/dump_next_run.txt (renamed to
+/// dump_next_run.used when read, so only one run dumps): every texture uploaded from guest memory
+/// is written once per key to <exe dir>/tex_dump/<key>_<w>x<h>_<format>.png (32-bit formats,
+/// rows in memory order) or .dds (BC formats). Keys are the same as in replacements.txt.
+bool DumpEnabled();
+/// Hashes the image; true (with the key) when this key was not dumped yet.
+bool NoteForDump(const ImageInfo& info, u64& key);
+/// Bytes to download for mip 0 of the image (0 = format not dumped).
+u32 DumpSize(const ImageInfo& info);
+void WriteDump(const ImageInfo& info, u64 key, const u8* data, size_t size);
+
+/// Bytes per 4x4 block for the BC formats the pictures can be encoded to (0 = not BC / unsupported).
+u32 BlockBytes(const ImageInfo& info);
+/// Encodes RGBA pixels (w, h multiples of 4, rows in memory order) to the image's BC format.
+std::vector<u8> EncodeBlocks(const ImageInfo& info, const u8* rgba, u32 w, u32 h);
 void NoteInputDevice(bool gamepad);
 bool PicturesActive();
 

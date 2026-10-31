@@ -1556,40 +1556,131 @@ void TextureCache::ApplyTexReplace(Image& image) {
     }
     auto& stream = buffer_cache.GetUtilityBuffer(MemoryUsage::Stream);
     const bool swap = TexReplace::SwapRedBlue(image.info);
+    const bool block = image.info.props.is_block;
+    const u32 levels = std::max(1u, image.info.resources.levels);
     boost::container::small_vector<vk::BufferImageCopy, 32> copies;
-    std::vector<u8> swapped;
     u64 lo = std::numeric_limits<u64>::max();
     u64 hi = 0;
     for (const auto& p : target->patches) {
-        const u8* src = p.rgba.data();
-        if (swap) {
-            swapped = p.rgba;
-            for (size_t i = 0; i + 3 < swapped.size(); i += 4) {
-                std::swap(swapped[i], swapped[i + 2]);
+        // 2026-10-31: mip m gets the picture box-filtered to 1/2^m (BC: whole 4x4 blocks only).
+        std::vector<u8> cur = p.rgba;
+        u32 cw = p.width, ch = p.height;
+        for (u32 m = 0; m < levels; ++m) {
+            if (m > 0) {
+                if (cw < 2 || ch < 2) {
+                    break;
+                }
+                const u32 nw = cw / 2, nh = ch / 2;
+                std::vector<u8> next(size_t(nw) * nh * 4);
+                for (u32 y = 0; y < nh; ++y) {
+                    for (u32 x = 0; x < nw; ++x) {
+                        for (u32 k = 0; k < 4; ++k) {
+                            const auto at = [&](u32 xx, u32 yy) {
+                                return u32(cur[(size_t(yy) * cw + xx) * 4 + k]);
+                            };
+                            next[(size_t(y) * nw + x) * 4 + k] =
+                                u8((at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) +
+                                    at(2 * x + 1, 2 * y + 1) + 2) / 4);
+                        }
+                    }
+                }
+                cur = std::move(next);
+                cw = nw;
+                ch = nh;
             }
-            src = swapped.data();
+            const u32 mx = p.x >> m, my = p.y >> m;
+            const u32 mip_w = std::max(1u, image.info.size.width >> m);
+            const u32 mip_h = std::max(1u, image.info.size.height >> m);
+            if (mx + cw > mip_w || my + ch > mip_h) {
+                break;
+            }
+            std::vector<u8> bytes = cur;
+            if (swap) {
+                for (size_t i = 0; i + 3 < bytes.size(); i += 4) {
+                    std::swap(bytes[i], bytes[i + 2]);
+                }
+            }
+            if (block) {
+                if ((mx | my | cw | ch) & 3) {
+                    break; // BC pictures must sit on whole blocks
+                }
+                bytes = TexReplace::EncodeBlocks(image.info, bytes.data(), cw, ch);
+            }
+            const auto [data, off] = stream.Map(bytes.size(), 16);
+            std::memcpy(data, bytes.data(), bytes.size());
+            stream.Commit();
+            lo = std::min<u64>(lo, off);
+            hi = std::max<u64>(hi, off + bytes.size());
+            copies.push_back({
+                .bufferOffset = off,
+                .bufferRowLength = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource{
+                    .aspectMask = vk::ImageAspectFlagBits::eColor,
+                    .mipLevel = m,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+                .imageOffset = {static_cast<s32>(mx), static_cast<s32>(my), 0},
+                .imageExtent = {cw, ch, 1},
+            });
         }
-        const auto [data, off] = stream.Map(p.rgba.size(), 16);
-        std::memcpy(data, src, p.rgba.size());
-        stream.Commit();
-        lo = std::min<u64>(lo, off);
-        hi = std::max<u64>(hi, off + p.rgba.size());
-        copies.push_back({
-            .bufferOffset = off,
-            .bufferRowLength = 0,
-            .bufferImageHeight = 0,
-            .imageSubresource{
-                .aspectMask = vk::ImageAspectFlagBits::eColor,
-                .mipLevel = 0,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-            .imageOffset = {static_cast<s32>(p.x), static_cast<s32>(p.y), 0},
-            .imageExtent = {p.width, p.height, 1},
-        });
     }
     if (!copies.empty()) {
         image.Upload(copies, stream.Handle(), lo, hi - lo);
+    }
+}
+
+void TextureCache::FlushTexDumps() {
+    std::vector<std::pair<VAddr, u64>> queue;
+    {
+        std::scoped_lock lk{tex_dump_mutex};
+        queue.swap(tex_dump_queue);
+    }
+    if (queue.empty()) {
+        return;
+    }
+    auto& download_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::Download);
+    for (const auto& [address, key] : queue) {
+        ImageId found{};
+        {
+            std::scoped_lock lock{mutex};
+            if (const auto it = page_table.find(address >> Traits::PageBits); it != nullptr) {
+                for (const ImageId id : *it) {
+                    if (slot_images[id].info.guest_address == address &&
+                        TexReplace::DumpSize(slot_images[id].info) != 0) {
+                        found = id;
+                    }
+                }
+            }
+        }
+        if (!found) {
+            continue;
+        }
+        Image& image = slot_images[found];
+        const u32 size = TexReplace::DumpSize(image.info);
+        if (size > 64_MB) {
+            continue;
+        }
+        const auto [mapped, offset] = download_buffer.Map(size);
+        download_buffer.Commit();
+        const vk::BufferImageCopy region = {
+            .bufferOffset = offset,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {image.info.size.width, image.info.size.height, 1},
+        };
+        scheduler.EndRendering();
+        image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
+        {
+            auto command_access = scheduler.AcquireCommandBuffer();
+            command_access.Handle().copyImageToBuffer(image.GetImage(), image.backing->state.layout,
+                                                      download_buffer.Handle(), region);
+        }
+        scheduler.Finish();
+        TexReplace::WriteDump(image.info, key, mapped, size);
     }
 }
 
@@ -1722,6 +1813,13 @@ void TextureCache::RefreshImage(Image& image) {
     image.Upload(image_copies, buffer, offset);
     if (TexReplace::Enabled() && image_copies.front().imageSubresource.mipLevel == 0) [[unlikely]] {
         ApplyTexReplace(image);
+    }
+    if (TexReplace::DumpEnabled() && image_copies.front().imageSubresource.mipLevel == 0) [[unlikely]] {
+        u64 key = 0;
+        if (TexReplace::NoteForDump(image.info, key)) {
+            std::scoped_lock lk{tex_dump_mutex};
+            tex_dump_queue.emplace_back(image.info.guest_address, key);
+        }
     }
     rc_lap(4);
     if (g_refresh_cost && rc_t - rc_t0 + g_refresh_lock_cyc > 350000) {

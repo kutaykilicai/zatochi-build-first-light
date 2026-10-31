@@ -40,6 +40,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/amdgpu/mtb_census.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/texture_cache/tex_replace.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/renderer_vulkan/vk_dlss_upscale.h"
 #include "video_core/renderer_vulkan/vk_dlss5.h"
@@ -9004,6 +9005,9 @@ void Rasterizer::FlushLazyFences() {
 }
 
 void Rasterizer::OnSubmit() {
+    if (VideoCore::TexReplace::DumpEnabled()) [[unlikely]] {
+        texture_cache.FlushTexDumps(); // SHADPS4_TEX_DUMP (2026-10-31)
+    }
     {
         // Diagnostic: SHADPS4_DUMP_IMAGES=addr[,addr...] (hex) with SHADPS4_DUMP_IMAGES_AT_S=N
         // dumps those surfaces at the first submit N s after the first one, twice (a frame apart).
